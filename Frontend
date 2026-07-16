@@ -1,0 +1,257 @@
+{
+  "name": "Replate",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.24.1",
+    "axios": "^1.7.2",
+    "framer-motion": "^11.3.19",
+    "chart.js": "^4.4.3",
+    "react-chartjs-2": "^5.2.0",
+    "react-icons": "^5.2.1",
+    "react-toastify": "^10.0.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "tailwindcss": "^3.4.9",
+    "vite": "^5.3.4"
+  }
+}
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>
+);
+
+import { Routes, Route } from "react-router-dom";
+
+import Home from "./pages/Home";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+
+function App() {
+  return (
+    <Routes>
+
+      <Route path="/" element={<Home />} />
+
+      <Route path="/login" element={<Login />} />
+
+      <Route path="/register" element={<Register />} />
+
+    </Routes>
+  );
+}
+
+export default App;
+
+import Navbar from "../components/Navbar";
+import Hero from "../components/Hero";
+import Features from "../components/Features";
+import HowItWorks from "../components/HowItWorks";
+import Portals from "../components/Portals";
+import Footer from "../components/Footer";
+
+export default function Home(){
+
+return(
+
+<>
+
+<Navbar/>
+
+<Hero/>
+
+<Features/>
+
+<HowItWorks/>
+
+<Portals/>
+
+<Footer/>
+
+</>
+
+);
+
+}
+
+import { Link } from "react-router-dom";
+
+export default function Navbar(){
+
+return(
+
+<nav className="navbar">
+
+<div className="logo">
+
+🌱 EcoShare
+
+</div>
+
+<ul>
+
+<li><a href="#features">Features</a></li>
+
+<li><a href="#how">How It Works</a></li>
+
+<li><a href="#portals">Portals</a></li>
+
+</ul>
+
+<div>
+
+<Link to="/login">
+
+<button>Login</button>
+
+</Link>
+
+<Link to="/register">
+
+<button className="green">
+
+Register
+
+</button>
+
+</Link>
+
+</div>
+
+</nav>
+
+);
+
+}
+
+export default function Hero(){
+
+return(
+
+<section className="hero">
+
+<div>
+
+<h1>
+
+Reduce Food Waste
+
+Save Lives
+
+Build Smarter Kitchens
+
+</h1>
+
+<p>
+
+Predict food demand, manage inventory, reduce waste and connect surplus food to nearby NGOs before it expires.
+
+</p>
+
+<button>
+
+Book Meal
+
+</button>
+
+</div>
+
+</section>
+
+);
+
+}
+
+export default function Features(){
+
+const features=[
+
+"Meal Booking",
+
+"Inventory Management",
+
+"AI Demand Prediction",
+
+"NGO Matching",
+
+"Food Tracking",
+
+"Waste Analytics",
+
+"QR Verification",
+
+"Eco Reward Points"
+
+];
+
+return(
+
+<section id="features">
+
+<h2>Features</h2>
+
+<div className="grid">
+
+{
+
+features.map((item,index)=>(
+
+<div key={index} className="card">
+
+<h3>{item}</h3>
+
+</div>
+
+))
+
+}
+
+</div>
+
+</section>
+
+);
+
+}
+
+export default function Footer(){
+
+return(
+
+<footer>
+
+<h2>EcoShare</h2>
+
+<p>
+
+Smart Food Waste Management & Redistribution System
+
+</p>
+
+<p>
+
+© 2026 All Rights Reserved
+
+</p>
+
+</footer>
+
+);
+
+}
+
