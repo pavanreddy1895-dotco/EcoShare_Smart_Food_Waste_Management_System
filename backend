@@ -1,24 +1,1080 @@
+### Package.JSON
 {
-  "name": "ecoshare-backend",
+  "name": "replate-backend",
   "version": "1.0.0",
-  "description": "EcoShare - Smart Food Waste Management & Redistribution System (Backend API)",
-  "main": "server.js",
+  "description": "RePlate - Smart Food Waste Management & Redistribution System (backend)",
+  "main": "src/server.js",
+  "type": "commonjs",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
   },
   "dependencies": {
-    "bcrypt": "^5.1.1",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "multer": "^1.4.5-lts.1",
     "mysql2": "^3.10.0",
-    "nodemailer": "^6.9.13",
-    "qrcode": "^1.5.3"
+    "socket.io": "^4.7.5",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
   }
 }
+
+### Backend DB.JS
+// MySQL connection pool. All modules import { pool } from here.
+require('dotenv').config();
+const mysql = require('mysql2/promise');
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 3306,
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'replate',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
+  dateStrings: true,
+});
+
+module.exports = { pool };
+
+### Backend AUTH.JS
+// Verifies the JWT on protected routes and attaches { id, role, name } to req.user
+const jwt = require('jsonwebtoken');
+
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: 'Missing bearer token' });
+  }
+
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = { id: payload.sub, role: payload.role, name: payload.name };
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+module.exports = { requireAuth };
+
+### role.js
+// Usage: router.post('/menus', requireAuth, requireRole('kitchen_manager'), handler)
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: `Requires role: ${allowedRoles.join(' or ')}` });
+    }
+    next();
+  };
+}
+
+module.exports = { requireRole };
+
+### QR Code.js
+// Generates a unique meal-pass code. Swap for a real QR image lib (e.g. `qrcode`
+// npm package) if you want an actual PNG/SVG — this returns the payload string
+// that a QR renderer would encode.
+const { v4: uuidv4 } = require('uuid');
+
+function generateMealPassCode(bookingId) {
+  return `RP-${bookingId}-${uuidv4().split('-')[0].toUpperCase()}`;
+}
+
+module.exports = { generateMealPassCode };
+
+### service.js
+// Adapters for email/SMS/push. Wire these to SendGrid/Twilio/FCM in production;
+// for now they log, so the rest of the system can call notify() unconditionally.
+async function sendEmail(to, subject, body) {
+  console.log(`[email] to=${to} subject="${subject}" body="${body}"`);
+  return true;
+}
+async function sendSms(to, body) {
+  console.log(`[sms] to=${to} body="${body}"`);
+  return true;
+}
+async function sendPush(userId, title, body) {
+  console.log(`[push] user=${userId} title="${title}" body="${body}"`);
+  return true;
+}
+
+async function notify(user, { channel, title, body }) {
+  if (channel === 'email') return sendEmail(user.email, title, body);
+  if (channel === 'sms') return sendSms(user.phone, body);
+  return sendPush(user.id, title, body);
+}
+
+module.exports = { sendEmail, sendSms, sendPush, notify };
+
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
+
+const authRoutes = require('./modules/auth/auth.routes');
+const mealsRoutes = require('./modules/meals/meals.routes');
+const inventoryRoutes = require('./modules/inventory/inventory.routes');
+const leftoversRoutes = require('./modules/leftovers/leftovers.routes');
+const donationsRoutes = require('./modules/donations/donations.routes');
+const ngoRoutes = require('./modules/ngo/ngo.routes');
+const adminRoutes = require('./modules/admin/admin.routes');
+const ecopointsRoutes = require('./modules/ecopoints/ecopoints.routes');
+const predictionsRoutes = require('./modules/predictions/predictions.routes');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get('/api/v1/health', (req, res) => res.json({ status: 'ok', service: 'replate-backend' }));
+
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1', mealsRoutes);              // /menus/today, /menus, /bookings, /bookings/:id, /bookings/me
+app.use('/api/v1/inventory', inventoryRoutes);
+app.use('/api/v1/leftovers', leftoversRoutes);
+app.use('/api/v1/donations', donationsRoutes);
+app.use('/api/v1/ngo', ngoRoutes);
+app.use('/api/v1/admin', adminRoutes);
+app.use('/api/v1/ecopoints', ecopointsRoutes);
+app.use('/api/v1/predictions', predictionsRoutes);
+
+// Central error handler
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+
+io.on('connection', (socket) => {
+  socket.on('join', (room) => socket.join(room)); // e.g. `kitchen_${id}`, `ngo_${id}`, `user_${id}`
+});
+app.set('io', io);
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`RePlate backend listening on :${PORT}`));
+
+module.exports = { app, server };
+
+### DSA ENGINE
+class HashMapIndex {
+  constructor() {
+    this.map = new Map();
+  }
+  set(key, value) {
+    this.map.set(key, value);
+    return this;
+  }
+  get(key) {
+    return this.map.get(key);
+  }
+  has(key) {
+    return this.map.has(key);
+  }
+  delete(key) {
+    return this.map.delete(key);
+  }
+  values() {
+    return Array.from(this.map.values());
+  }
+  size() {
+    return this.map.size;
+  }
+}
+
+module.exports = { HashMapIndex };
+
+class PriorityQueue {
+  constructor(compareFn) {
+    this.heap = [];
+    this.compare = compareFn || ((a, b) => a - b);
+  }
+
+  size() {
+    return this.heap.length;
+  }
+
+  isEmpty() {
+    return this.heap.length === 0;
+  }
+
+  peek() {
+    return this.heap[0];
+  }
+
+  push(item) {
+    this.heap.push(item);
+    this._bubbleUp(this.heap.length - 1);
+    return this;
+  }
+
+  pop() {
+    if (this.heap.length === 0) return undefined;
+    const top = this.heap[0];
+    const last = this.heap.pop();
+    if (this.heap.length > 0) {
+      this.heap[0] = last;
+      this._bubbleDown(0);
+    }
+    return top;
+  }
+
+  _bubbleUp(i) {
+    while (i > 0) {
+      const parent = Math.floor((i - 1) / 2);
+      if (this.compare(this.heap[i], this.heap[parent]) < 0) {
+        [this.heap[i], this.heap[parent]] = [this.heap[parent], this.heap[i]];
+        i = parent;
+      } else break;
+    }
+  }
+
+  _bubbleDown(i) {
+    const n = this.heap.length;
+    while (true) {
+      let smallest = i;
+      const left = 2 * i + 1;
+      const right = 2 * i + 2;
+      if (left < n && this.compare(this.heap[left], this.heap[smallest]) < 0) smallest = left;
+      if (right < n && this.compare(this.heap[right], this.heap[smallest]) < 0) smallest = right;
+      if (smallest === i) break;
+      [this.heap[i], this.heap[smallest]] = [this.heap[smallest], this.heap[i]];
+      i = smallest;
+    }
+  }
+}
+
+function expiryQueue(leftovers) {
+  const pq = new PriorityQueue((a, b) => new Date(a.expiry_at) - new Date(b.expiry_at));
+  leftovers.forEach((item) => pq.push(item));
+  return pq;
+}
+
+module.exports = { PriorityQueue, expiryQueue };
+
+class Graph {
+  constructor() {
+    this.adjacency = new Map();
+  }
+
+  addNode(id) {
+    if (!this.adjacency.has(id)) this.adjacency.set(id, []);
+  }
+
+  addEdge(fromId, toId, weight) {
+    this.addNode(fromId);
+    this.addNode(toId);
+    this.adjacency.get(fromId).push({ to: toId, weight });
+    this.adjacency.get(toId).push({ to: fromId, weight });
+  }
+
+  dijkstra(sourceId) {
+    const distances = new Map();
+    const previous = new Map();
+    const visited = new Set();
+
+    for (const node of this.adjacency.keys()) distances.set(node, Infinity);
+    distances.set(sourceId, 0);
+
+    while (visited.size < this.adjacency.size) {
+      let current = null;
+      let currentDist = Infinity;
+      for (const [node, dist] of distances) {
+        if (!visited.has(node) && dist < currentDist) {
+          current = node;
+          currentDist = dist;
+        }
+      }
+      if (current === null) break;
+      visited.add(current);
+
+      for (const edge of this.adjacency.get(current) || []) {
+        const candidate = currentDist + edge.weight;
+        if (candidate < distances.get(edge.to)) {
+          distances.set(edge.to, candidate);
+          previous.set(edge.to, current);
+        }
+      }
+    }
+
+    return { distances, previous };
+  }
+
+  static buildPath(previous, sourceId, targetId) {
+    const path = [targetId];
+    let current = targetId;
+    while (current !== sourceId) {
+      current = previous.get(current);
+      if (current === undefined) return null;
+      path.unshift(current);
+    }
+    return path;
+  }
+
+  shortestPath(sourceId, targetId) {
+    const { distances, previous } = this.dijkstra(sourceId);
+    return {
+      distance: distances.get(targetId) ?? Infinity,
+      path: Graph.buildPath(previous, sourceId, targetId),
+    };
+  }
+}
+
+module.exports = { Graph };
+
+function assignNearestNgo(leftover, ngosWithDistance, remainingCapacity) {
+  const sorted = [...ngosWithDistance].sort((a, b) => a.distance_km - b.distance_km);
+
+  for (const candidate of sorted) {
+    const capacityLeft = remainingCapacity.get(candidate.ngo_id) ?? 0;
+    if (capacityLeft >= leftover.quantity) {
+      remainingCapacity.set(candidate.ngo_id, capacityLeft - leftover.quantity);
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function priorityScore({ freshnessScore, distanceKm, quantityKg, maxQuantityKg = 50 }) {
+  const freshnessTerm = 0.5 * freshnessScore;
+  const distanceTerm = 0.3 * (100 / (1 + distanceKm));
+  const quantityTerm = 0.2 * Math.min(100, (quantityKg / maxQuantityKg) * 100);
+  return Math.round((freshnessTerm + distanceTerm + quantityTerm) * 100) / 100;
+}
+
+module.exports = { assignNearestNgo, priorityScore };
+
+function sortByExpiry(items) {
+  return [...items].sort((a, b) => new Date(a.expiry_at) - new Date(b.expiry_at));
+}
+
+function sortByWasteDesc(kitchenStats) {
+  return [...kitchenStats].sort((a, b) => b.wasted_kg - a.wasted_kg);
+}
+
+function sortNgosByDonationsDesc(ngoStats) {
+  return [...ngoStats].sort((a, b) => b.total_donations_kg - a.total_donations_kg);
+}
+
+module.exports = { sortByExpiry, sortByWasteDesc, sortNgosByDonationsDesc };
+
+function binarySearch(sortedArray, target, keyFn = (x) => x) {
+  let lo = 0;
+  let hi = sortedArray.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const midKey = keyFn(sortedArray[mid]);
+    if (midKey === target) return mid;
+    if (midKey < target) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+module.exports = { binarySearch };
+
+class TrieNode {
+  constructor() {
+    this.children = new Map();
+    this.isEnd = false;
+    this.refs = [];
+  }
+}
+
+class Trie {
+  constructor() {
+    this.root = new TrieNode();
+  }
+
+  insert(word, refId) {
+    let node = this.root;
+    for (const ch of word.toLowerCase()) {
+      if (!node.children.has(ch)) node.children.set(ch, new TrieNode());
+      node = node.children.get(ch);
+    }
+    node.isEnd = true;
+    if (refId !== undefined) node.refs.push(refId);
+  }
+
+  searchPrefix(prefix) {
+    let node = this.root;
+    for (const ch of prefix.toLowerCase()) {
+      if (!node.children.has(ch)) return [];
+      node = node.children.get(ch);
+    }
+    const results = [];
+    this._collect(node, results);
+    return results;
+  }
+
+  _collect(node, results) {
+    if (node.isEnd) results.push(...node.refs);
+    for (const child of node.children.values()) this._collect(child, results);
+  }
+}
+
+module.exports = { Trie };
+
+class ListNode {
+  constructor(value) {
+    this.value = value;
+    this.next = null;
+  }
+}
+
+class BookingHistoryList {
+  constructor() {
+    this.head = null;
+    this.tail = null;
+    this.length = 0;
+  }
+
+  append(booking) {
+    const node = new ListNode(booking);
+    if (!this.tail) {
+      this.head = this.tail = node;
+    } else {
+      this.tail.next = node;
+      this.tail = node;
+    }
+    this.length++;
+    return this;
+  }
+
+  recent(n = 10) {
+    const all = [];
+    let node = this.head;
+    while (node) {
+      all.push(node.value);
+      node = node.next;
+    }
+    return all.slice(-n).reverse();
+  }
+
+  toArray() {
+    const out = [];
+    let node = this.head;
+    while (node) {
+      out.push(node.value);
+      node = node.next;
+    }
+    return out;
+  }
+}
+
+module.exports = { BookingHistoryList };
+
+class UndoStack {
+  constructor(limit = 20) {
+    this.items = [];
+    this.limit = limit;
+  }
+
+  push(entry) {
+    this.items.push(entry);
+    if (this.items.length > this.limit) this.items.shift();
+  }
+
+  undoLast() {
+    const entry = this.items.pop();
+    if (entry && typeof entry.undo === 'function') entry.undo();
+    return entry || null;
+  }
+
+  peek() {
+    return this.items[this.items.length - 1] || null;
+  }
+
+  size() {
+    return this.items.length;
+  }
+}
+
+module.exports = { UndoStack };
+
+module.exports = {
+  ...require('./hashMap'),
+  ...require('./priorityQueue'),
+  ...require('./graph'),
+  ...require('./greedyMatch'),
+  ...require('./sorting'),
+  ...require('./binarySearch'),
+  ...require('./trie'),
+  ...require('./linkedList'),
+  ...require('./stack'),
+};
+
+### MODULES
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { pool } = require('../../config/db');
+
+function issueToken(user) {
+  return jwt.sign(
+    { sub: user.id, role: user.role, name: user.name },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+  );
+}
+
+async function register(req, res) {
+  const { name, email, password, role, phone } = req.body;
+  if (!name || !email || !password || !role) {
+    return res.status(400).json({ error: 'name, email, password, role are required' });
+  }
+  const validRoles = ['student', 'kitchen_manager', 'ngo', 'admin'];
+  if (!validRoles.includes(role)) {
+    return res.status(400).json({ error: `role must be one of ${validRoles.join(', ')}` });
+  }
+
+  const [existing] = await pool.query('SELECT id FROM users WHERE email = ?', [email]);
+  if (existing.length) return res.status(409).json({ error: 'Email already registered' });
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const [result] = await pool.query(
+    'INSERT INTO users (name, email, password_hash, role, phone) VALUES (?, ?, ?, ?, ?)',
+    [name, email, passwordHash, role, phone || null]
+  );
+
+  const user = { id: result.insertId, name, role };
+  return res.status(201).json({ token: issueToken(user), user: { id: user.id, name, email, role } });
+}
+
+async function login(req, res) {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+
+  const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
+  const user = rows[0];
+  if (!user) return res.status(401).json({ error: 'Invalid credentials' });
+
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
+
+  return res.json({
+    token: issueToken(user),
+    user: { id: user.id, name: user.name, email: user.email, role: user.role, eco_points: user.eco_points },
+  });
+}
+
+async function me(req, res) {
+  const [rows] = await pool.query(
+    'SELECT id, name, email, role, eco_points, phone, language FROM users WHERE id = ?',
+    [req.user.id]
+  );
+  if (!rows[0]) return res.status(404).json({ error: 'User not found' });
+  return res.json(rows[0]);
+}
+
+module.exports = { register, login, me };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./auth.controller');
+const { requireAuth } = require('../../middleware/auth');
+
+router.post('/register', ctrl.register);
+router.post('/login', ctrl.login);
+router.get('/me', requireAuth, ctrl.me);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+const { generateMealPassCode } = require('../../utils/qrcode');
+const { notify } = require('../notifications/notifications.service');
+
+async function todayMenu(req, res) {
+  const [rows] = await pool.query(
+    `SELECT m.*, k.name AS kitchen_name
+     FROM menus m JOIN kitchens k ON k.id = m.kitchen_id
+     WHERE m.serve_date = CURDATE()
+     ORDER BY FIELD(m.meal_type, 'breakfast','lunch','snacks','dinner')`
+  );
+  return res.json(rows);
+}
+
+async function bookMeal(req, res) {
+  const { menu_id, cutoff_at } = req.body;
+  if (!menu_id) return res.status(400).json({ error: 'menu_id is required' });
+
+  const [existing] = await pool.query(
+    "SELECT id FROM bookings WHERE student_id = ? AND menu_id = ? AND status = 'booked'",
+    [req.user.id, menu_id]
+  );
+  if (existing.length) return res.status(409).json({ error: 'Already booked for this meal' });
+
+  const [result] = await pool.query(
+    'INSERT INTO bookings (student_id, menu_id, status, booked_at, cutoff_at) VALUES (?, ?, "booked", NOW(), ?)',
+    [req.user.id, menu_id, cutoff_at || null]
+  );
+
+  const qr = generateMealPassCode(result.insertId);
+  await pool.query('UPDATE bookings SET qr_code = ? WHERE id = ?', [qr, result.insertId]);
+
+  await pool.query(
+    'INSERT INTO eco_point_ledger (user_id, points, reason, created_at) VALUES (?, 5, "meal_booked", NOW())',
+    [req.user.id]
+  );
+  await pool.query('UPDATE users SET eco_points = eco_points + 5 WHERE id = ?', [req.user.id]);
+
+  await notify(req.user, { channel: 'push', title: 'Meal booked', body: `Pass ${qr} generated.` });
+
+  return res.status(201).json({ booking_id: result.insertId, qr_code: qr });
+}
+
+async function cancelBooking(req, res) {
+  const { id } = req.params;
+  const [rows] = await pool.query('SELECT * FROM bookings WHERE id = ? AND student_id = ?', [id, req.user.id]);
+  const booking = rows[0];
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.cutoff_at && new Date() > new Date(booking.cutoff_at)) {
+    return res.status(400).json({ error: 'Cutoff has passed, cannot cancel' });
+  }
+  await pool.query('UPDATE bookings SET status = "cancelled" WHERE id = ?', [id]);
+  return res.json({ ok: true });
+}
+
+async function myBookings(req, res) {
+  const [rows] = await pool.query(
+    `SELECT b.*, m.item_name, m.meal_type, m.serve_date
+     FROM bookings b JOIN menus m ON m.id = b.menu_id
+     WHERE b.student_id = ? ORDER BY b.booked_at DESC LIMIT 50`,
+    [req.user.id]
+  );
+  return res.json(rows);
+}
+
+async function createOrUpdateMenu(req, res) {
+  const { kitchen_id, meal_type, item_name, calories, serve_date } = req.body;
+  const [result] = await pool.query(
+    'INSERT INTO menus (kitchen_id, meal_type, item_name, calories, serve_date) VALUES (?, ?, ?, ?, ?)',
+    [kitchen_id, meal_type, item_name, calories || null, serve_date]
+  );
+  return res.status(201).json({ id: result.insertId });
+}
+
+module.exports = { todayMenu, bookMeal, cancel
+Booking, myBookings, createOrUpdateMenu };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./meals.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.get('/menus/today', requireAuth, ctrl.todayMenu);
+router.post('/menus', requireAuth, requireRole('kitchen_manager'), ctrl.createOrUpdateMenu);
+router.post('/bookings', requireAuth, requireRole('student'), ctrl.bookMeal);
+router.delete('/bookings/:id', requireAuth, requireRole('student'), ctrl.cancelBooking);
+router.get('/bookings/me', requireAuth, requireRole('student'), ctrl.myBookings);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+const { binarySearch } = require('../../dsa-engine/binarySearch');
+
+async function listInventory(req, res) {
+  const { kitchen_id } = req.query;
+  const [rows] = await pool.query(
+    'SELECT * FROM inventory WHERE kitchen_id = ? ORDER BY expiry_date ASC',
+    [kitchen_id]
+  );
+  return res.json(rows);
+}
+
+async function addStock(req, res) {
+  const { kitchen_id, item_name, quantity, unit, expiry_date } = req.body;
+  const [result] = await pool.query(
+    'INSERT INTO inventory (kitchen_id, item_name, quantity, unit, expiry_date) VALUES (?, ?, ?, ?, ?)',
+    [kitchen_id, item_name, quantity, unit, expiry_date]
+  );
+  return res.status(201).json({ id: result.insertId });
+}
+
+async function updateStock(req, res) {
+  const { id } = req.params;
+  const { quantity, expiry_date } = req.body;
+  await pool.query('UPDATE inventory SET quantity = ?, expiry_date = ? WHERE id = ?', [
+    quantity, expiry_date, id,
+  ]);
+  return res.json({ ok: true });
+}
+
+async function findItemByName(req, res) {
+  const { kitchen_id, name } = req.query;
+  const [rows] = await pool.query(
+    'SELECT * FROM inventory WHERE kitchen_id = ? ORDER BY item_name ASC',
+    [kitchen_id]
+  );
+  const idx = binarySearch(rows, name.toLowerCase(), (r) => r.item_name.toLowerCase());
+  if (idx === -1) return res.status(404).json({ error: 'Item not found' });
+  return res.json(rows[idx]);
+}
+
+module.exports = { listInventory, addStock, updateStock, findItemByName };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./inventory.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.get('/', requireAuth, requireRole('kitchen_manager', 'admin'), ctrl.listInventory);
+router.get('/find', requireAuth, requireRole('kitchen_manager', 'admin'), ctrl.findItemByName);
+router.post('/', requireAuth, requireRole('kitchen_manager'), ctrl.addStock);
+router.put('/:id', requireAuth, requireRole('kitchen_manager'), ctrl.updateStock);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+
+function computeFreshnessScore(cookedAt, expiryAt, now = new Date()) {
+  const cooked = new Date(cookedAt).getTime();
+  const expiry = new Date(expiryAt).getTime();
+  const current = now.getTime();
+  if (current >= expiry) return 0;
+  if (current <= cooked) return 100;
+  return Math.round(((expiry - current) / (expiry - cooked)) * 10000) / 100;
+}
+
+async function logLeftover(req, res) {
+  const { kitchen_id, food_name, quantity, unit, cooked_at, expiry_at } = req.body;
+  const freshness_score = computeFreshnessScore(cooked_at, expiry_at);
+
+  const [result] = await pool.query(
+    `INSERT INTO leftovers (kitchen_id, food_name, quantity, unit, cooked_at, expiry_at, freshness_score, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'available')`,
+    [kitchen_id, food_name, quantity, unit, cooked_at, expiry_at, freshness_score]
+  );
+
+  return res.status(201).json({ id: result.insertId, freshness_score });
+}
+
+async function listAvailable(req, res) {
+  const [rows] = await pool.query(
+    `SELECT * FROM leftovers WHERE status = 'available' ORDER BY expiry_at ASC`
+  );
+  const withLiveScore = rows.map((r) => ({
+    ...r,
+    freshness_score: computeFreshnessScore(r.cooked_at, r.expiry_at),
+  }));
+  return res.json(withLiveScore);
+}
+
+module.exports = { logLeftover, listAvailable, computeFreshnessScore };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./leftovers.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.post('/', requireAuth, requireRole('kitchen_manager'), ctrl.logLeftover);
+router.get('/available', requireAuth, requireRole('kitchen_manager', 'ngo', 'admin'), ctrl.listAvailable);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+const { Graph } = require('../../dsa-engine/graph');
+const { assignNearestNgo, priorityScore } = require('../../dsa-engine/greedyMatch');
+const { expiryQueue } = require('../../dsa-engine/priorityQueue');
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function listAvailableForNgo(req, res) {
+  const [leftovers] = await pool.query(`SELECT * FROM leftovers WHERE status = 'available'`);
+  const [ngo] = await pool.query('SELECT * FROM ngos WHERE id = ?', [req.query.ngo_id]);
+  const thisNgo = ngo[0];
+  if (!thisNgo) return res.status(404).json({ error: 'NGO not found' });
+
+  const [kitchens] = await pool.query('SELECT * FROM kitchens');
+  const kitchenById = new Map(kitchens.map((k) => [k.id, k]));
+
+  const ranked = leftovers
+    .map((item) => {
+      const kitchen = kitchenById.get(item.kitchen_id);
+      const distanceKm = kitchen
+        ? Math.round(haversineKm(kitchen.latitude, kitchen.longitude, thisNgo.latitude, thisNgo.longitude) * 10) / 10
+        : null;
+      return {
+        ...item,
+        distance_km: distanceKm,
+        priority_score: priorityScore({
+          freshnessScore: item.freshness_score,
+          distanceKm: distanceKm ?? 999,
+          quantityKg: item.quantity,
+        }),
+      };
+    })
+    .sort((a, b) => b.priority_score - a.priority_score);
+
+  return res.json(ranked);
+}
+
+async function acceptDonation(req, res) {
+  const { leftoverId } = req.params;
+  const { ngo_id } = req.body;
+
+  const [[leftover]] = await pool.query('SELECT * FROM leftovers WHERE id = ?', [leftoverId]);
+  if (!leftover || leftover.status !== 'available') {
+    return res.status(409).json({ error: 'Leftover not available' });
+  }
+
+  const [[kitchen]] = await pool.query('SELECT * FROM kitchens WHERE id = ?', [leftover.kitchen_id]);
+  const [[ngo]] = await pool.query('SELECT * FROM ngos WHERE id = ?', [ngo_id]);
+
+  const g = new Graph();
+  const kNode = `kitchen_${kitchen.id}`;
+  const nNode = `ngo_${ngo.id}`;
+  g.addEdge(kNode, nNode, haversineKm(kitchen.latitude, kitchen.longitude, ngo.latitude, ngo.longitude));
+  const { distance } = g.shortestPath(kNode, nNode);
+  const etaMinutes = Math.round((distance / 25) * 60);
+
+  const [result] = await pool.query(
+    `INSERT INTO donations (leftover_id, ngo_id, kitchen_id, distance_km, eta_minutes, priority_score, status, matched_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'matched', NOW())`,
+    [leftoverId, ngo_id, kitchen.id, distance, etaMinutes,
+      priorityScore({ freshnessScore: leftover.freshness_score, distanceKm: distance, quantityKg: leftover.quantity })]
+  );
+  await pool.query(`UPDATE leftovers SET status = 'matched' WHERE id = ?`, [leftoverId]);
+
+  return res.status(201).json({ donation_id: result.insertId, distance_km: distance, eta_minutes: etaMinutes });
+}
+
+async function expiryOrderedQueue(req, res) {
+  const [rows] = await pool.query(
+    `SELECT * FROM leftovers WHERE kitchen_id = ? AND status = 'available'`,
+    [req.query.kitchen_id]
+  );
+  const pq = expiryQueue(rows);
+  const ordered = [];
+  while (!pq.isEmpty()) ordered.push(pq.pop());
+  return res.json(ordered);
+}
+
+async function markDelivered(req, res) {
+  const { id } = req.params;
+  await pool.query(
+    `UPDATE donations SET status = 'delivered', delivered_at = NOW(), certificate_url = ? WHERE id = ?`,
+    [`/certificates/donation-${id}.pdf`, id]
+  );
+  return res.json({ ok: true });
+}
+
+module.exports = { listAvailableForNgo, acceptDonation, expiryOrderedQueue, markDelivered, haversineKm };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./donations.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.get('/available', requireAuth, requireRole('ngo', 'admin'), ctrl.listAvailableForNgo);
+router.post('/:leftoverId/accept', requireAuth, requireRole('ngo'), ctrl.acceptDonation);
+router.get('/queue', requireAuth, requireRole('kitchen_manager', 'admin'), ctrl.expiryOrderedQueue);
+router.post('/:id/deliver', requireAuth, requireRole('ngo'), ctrl.markDelivered);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+
+async function listNgos(req, res) {
+  const [rows] = await pool.query('SELECT * FROM ngos ORDER BY name ASC');
+  return res.json(rows);
+}
+
+async function registerNgo(req, res) {
+  const { name, contact_person, phone, latitude, longitude, capacity_kg } = req.body;
+  const [result] = await pool.query(
+    'INSERT INTO ngos (name, contact_person, phone, latitude, longitude, capacity_kg) VALUES (?, ?, ?, ?, ?, ?)',
+    [name, contact_person, phone, latitude, longitude, capacity_kg]
+  );
+  return res.status(201).json({ id: result.insertId });
+}
+
+async function donationHistory(req, res) {
+  const { ngo_id } = req.params;
+  const [rows] = await pool.query(
+    `SELECT d.*, l.food_name, l.quantity, l.unit FROM donations d
+     JOIN leftovers l ON l.id = d.leftover_id
+     WHERE d.ngo_id = ? ORDER BY d.matched_at DESC`,
+    [ngo_id]
+  );
+  return res.json(rows);
+}
+
+module.exports = { listNgos, registerNgo, donationHistory };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./ngo.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.get('/', requireAuth, ctrl.listNgos);
+router.post('/', requireAuth, requireRole('admin'), ctrl.registerNgo);
+router.get('/:ngo_id/history', requireAuth, requireRole('ngo', 'admin'), ctrl.donationHistory);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+
+async function leaderboard(req, res) {
+  const [rows] = await pool.query(
+    `SELECT id, name, eco_points FROM users WHERE role = 'student' ORDER BY eco_points DESC LIMIT 20`
+  );
+  return res.json(rows);
+}
+
+async function myLedger(req, res) {
+  const [rows] = await pool.query(
+    'SELECT * FROM eco_point_ledger WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+    [req.user.id]
+  );
+  return res.json(rows);
+}
+
+module.exports = { leaderboard, myLedger };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./ecopoints.controller');
+const { requireAuth } = require('../../middleware/auth');
+
+router.get('/leaderboard', requireAuth, ctrl.leaderboard);
+router.get('/me', requireAuth, ctrl.myLedger);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+
+async function predictDemand(req, res) {
+  const { kitchen_id, meal_type } = req.query;
+
+  const [history] = await pool.query(
+    `SELECT DATE(b.booked_at) AS d, COUNT(*) AS cnt
+     FROM bookings b JOIN menus m ON m.id = b.menu_id
+     WHERE m.kitchen_id = ? AND m.meal_type = ? AND b.status != 'cancelled'
+       AND b.booked_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+     GROUP BY DATE(b.booked_at)`,
+    [kitchen_id, meal_type]
+  );
+
+  if (history.length === 0) {
+    return res.json({ predicted_qty: null, confidence: 0, note: 'Not enough history yet' });
+  }
+
+  const counts = history.map((r) => r.cnt);
+  const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+  const variance = counts.reduce((sum, c) => sum + (c - avg) ** 2, 0) / counts.length;
+  const stdDev = Math.sqrt(variance);
+
+  const today = new Date();
+  const isWeekend = [0, 6].includes(today.getDay());
+  const weekendAdjustment = isWeekend ? 0.9 : 1.0;
+
+  const predicted = Math.round(avg * weekendAdjustment);
+  const confidence = Math.max(50, Math.min(98, Math.round(100 - (stdDev / (avg || 1)) * 100)));
+
+  await pool.query(
+    `INSERT INTO demand_predictions (kitchen_id, meal_date, meal_type, predicted_qty, confidence, factors)
+     VALUES (?, CURDATE(), ?, ?, ?, ?)`,
+    [kitchen_id, meal_type, predicted, confidence, JSON.stringify({ avg, stdDev, isWeekend, sampleDays: counts.length })]
+  );
+
+  return res.json({ predicted_qty: predicted, confidence, sample_days: counts.length });
+}
+
+module.exports = { predictDemand };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./predictions.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.get('/', requireAuth, requireRole('kitchen_manager', 'admin'), ctrl.predictDemand);
+
+module.exports = router;
+
+const { pool } = require('../../config/db');
+const { sortByWasteDesc, sortNgosByDonationsDesc } = require('../../dsa-engine/sorting');
+
+async function analytics(req, res) {
+  const [[{ meals_saved }]] = await pool.query(
+    `SELECT COUNT(*) AS meals_saved FROM bookings WHERE status = 'attended'`
+  );
+  const [[{ total_donations_kg }]] = await pool.query(
+    `SELECT COALESCE(SUM(l.quantity), 0) AS total_donations_kg
+     FROM donations d JOIN leftovers l ON l.id = d.leftover_id WHERE d.status = 'delivered'`
+  );
+  const [[{ students_registered }]] = await pool.query(
+    `SELECT COUNT(*) AS students_registered FROM users WHERE role = 'student'`
+  );
+  const [[{ active_ngos }]] = await pool.query(`SELECT COUNT(*) AS active_ngos FROM ngos`);
+
+  const [wasteByKitchen] = await pool.query(
+    `SELECT kitchen_id, COALESCE(SUM(quantity), 0) AS wasted_kg
+     FROM leftovers WHERE status = 'expired' GROUP BY kitchen_id`
+  );
+  const [donationsByNgo] = await pool.query(
+    `SELECT ngo_id, COALESCE(SUM(l.quantity), 0) AS total_donations_kg
+     FROM donations d JOIN leftovers l ON l.id = d.leftover_id
+     WHERE d.status = 'delivered' GROUP BY ngo_id`
+  );
+
+  return res.json({
+    meals_saved,
+    total_donations_kg,
+    students_registered,
+    active_ngos,
+    co2_avoided_kg: Math.round(total_donations_kg * 2.5),
+    waste_ranking: sortByWasteDesc(wasteByKitchen),
+    ngo_leaderboard: sortNgosByDonationsDesc(donationsByNgo),
+  });
+}
+
+async function listUsers(req, res) {
+  const [rows] = await pool.query('SELECT id, name, email, role, eco_points FROM users ORDER BY id DESC LIMIT 200');
+  return res.json(rows);
+}
+
+async function listKitchens(req, res) {
+  const [rows] = await pool.query('SELECT * FROM kitchens');
+  return res.json(rows);
+}
+
+module.exports = { analytics, listUsers, listKitchens };
+
+const express = require('express');
+const router = express.Router();
+const ctrl = require('./admin.controller');
+const { requireAuth } = require('../../middleware/auth');
+const { requireRole } = require('../../middleware/role');
+
+router.use(requireAuth, requireRole('admin'));
+router.get('/analytics', ctrl.analytics);
+router.get('/users', ctrl.listUsers);
+router.get('/kitchens', ctrl.listKitchens);
+
+module.exports = router;
+
+
